@@ -1,0 +1,19 @@
+apiVersion: core.rukpak.io/v1alpha1
+kind: BundleDeployment
+metadata:
+  name: my-bundle
+spec:
+  provisionerClassName: core-rukpak-io-plain
+  template:
+    metadata:
+      labels:
+        app: my-bundle
+    spec:
+      source:
+        type: git
+        git:
+          ref:
+            branch: main
+          directory: ./dev/deploy
+          repository: https://github.com/exdx/combo-bundle
+      provisionerClassName: core-rukpak-io-plain
