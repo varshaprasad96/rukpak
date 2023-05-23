@@ -67,6 +67,7 @@ func init() {
 }
 
 func main() {
+	fmt.Println("going here first")
 	var (
 		httpBindAddr                string
 		httpExternalAddr            string

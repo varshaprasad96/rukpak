@@ -1,19 +1,16 @@
 apiVersion: core.rukpak.io/v1alpha1
 kind: BundleDeployment
 metadata:
-  name: my-bundle
+  name: prometheus
 spec:
   provisionerClassName: core-rukpak-io-plain
   template:
     metadata:
       labels:
-        app: my-bundle
+        app: prometheus
     spec:
+      provisionerClassName: core-rukpak-io-registry
       source:
-        type: git
-        git:
-          ref:
-            branch: main
-          directory: ./dev/deploy
-          repository: https://github.com/exdx/combo-bundle
-      provisionerClassName: core-rukpak-io-plain
+        type: image
+        image:
+          ref: quay.io/operatorhubio/prometheus:v0.47.0--20220325T220130

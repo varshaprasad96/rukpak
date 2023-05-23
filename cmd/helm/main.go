@@ -155,6 +155,9 @@ func main() {
 	}
 
 	var rootCAs *x509.CertPool
+
+	fmt.Println("rootCAs before", rootCAs, "bundleCAFile", bundleCAFile)
+
 	if bundleCAFile != "" {
 		var err error
 		if rootCAs, err = util.LoadCertPool(bundleCAFile); err != nil {
@@ -162,6 +165,8 @@ func main() {
 			os.Exit(1)
 		}
 	}
+
+	fmt.Println("rootCAs after", rootCAs)
 
 	httpLoader := storage.NewHTTP(
 		storage.WithRootCAs(rootCAs),
@@ -191,6 +196,8 @@ func main() {
 	// an S3 bucket), we could have separate processes for finalizer handling
 	// and the primary helm provisioner controller. For now, the assumption is
 	// that we are not using such an implementation.
+
+	fmt.Println("starting the helm provisioner here")
 	bundleFinalizers := crfinalizer.NewFinalizers()
 	if err := bundleFinalizers.Register(finalizer.DeleteCachedBundleKey, &finalizer.DeleteCachedBundle{Storage: bundleStorage}); err != nil {
 		setupLog.Error(err, "unable to register finalizer", "finalizerKey", finalizer.DeleteCachedBundleKey)
