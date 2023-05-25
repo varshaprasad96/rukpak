@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"k8s.io/client-go/kubernetes"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
 
 	rukpakv1alpha1 "github.com/operator-framework/rukpak/api/v1alpha1"
@@ -102,6 +103,46 @@ func (s *unpacker) Unpack(ctx context.Context, bundle *rukpakv1alpha1.Bundle) (*
 //
 // TODO: refactor NewDefaultUnpacker due to growing parameter list
 func NewDefaultUnpacker(systemNsCluster cluster.Cluster, namespace, unpackImage string, baseUploadManagerURL string, rootCAs *x509.CertPool) (Unpacker, error) {
+	cfg := systemNsCluster.GetConfig()
+	kubeClient, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	httpTransport := http.DefaultTransport.(*http.Transport).Clone()
+	if httpTransport.TLSClientConfig == nil {
+		httpTransport.TLSClientConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+	httpTransport.TLSClientConfig.RootCAs = rootCAs
+	return NewUnpacker(map[rukpakv1alpha1.SourceType]Unpacker{
+		rukpakv1alpha1.SourceTypeImage: &Image{
+			Client:       systemNsCluster.GetClient(),
+			KubeClient:   kubeClient,
+			PodNamespace: namespace,
+			UnpackImage:  unpackImage,
+		},
+		rukpakv1alpha1.SourceTypeGit: &Git{
+			Reader:          systemNsCluster.GetClient(),
+			SecretNamespace: namespace,
+		},
+		rukpakv1alpha1.SourceTypeConfigMaps: &ConfigMaps{
+			Reader:             systemNsCluster.GetClient(),
+			ConfigMapNamespace: namespace,
+		},
+		rukpakv1alpha1.SourceTypeUpload: &Upload{
+			baseDownloadURL: baseUploadManagerURL,
+			bearerToken:     systemNsCluster.GetConfig().BearerToken,
+			client:          http.Client{Timeout: uploadClientTimeout, Transport: httpTransport},
+		},
+		rukpakv1alpha1.SourceTypeHTTP: &HTTP{
+			Reader:          systemNsCluster.GetClient(),
+			SecretNamespace: namespace,
+		},
+	}), nil
+}
+
+func NewDefaultUnpackerImage(systemNsCluster cluster.Cluster, namespace, unpackImage string, baseUploadManagerURL string, rootCAs *x509.CertPool, client client.Client) (Unpacker, error) {
 	cfg := systemNsCluster.GetConfig()
 	kubeClient, err := kubernetes.NewForConfig(cfg)
 	if err != nil {

@@ -9,12 +9,14 @@ import (
 	"io"
 	"io/fs"
 	"strings"
+	"time"
 
 	"github.com/nlepage/go-tarfs"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	applyconfigurationcorev1 "k8s.io/client-go/applyconfigurations/core/v1"
 	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -35,6 +37,7 @@ type Image struct {
 const imageBundleUnpackContainerName = "bundle"
 
 func (i *Image) Unpack(ctx context.Context, bundle *rukpakv1alpha1.Bundle) (*Result, error) {
+	fmt.Println("unpacking image type")
 	if bundle.Spec.Source.Type != rukpakv1alpha1.SourceTypeImage {
 		return nil, fmt.Errorf("bundle source type %q not supported", bundle.Spec.Source.Type)
 	}
@@ -45,9 +48,23 @@ func (i *Image) Unpack(ctx context.Context, bundle *rukpakv1alpha1.Bundle) (*Res
 	pod := &corev1.Pod{}
 	op, err := i.ensureUnpackPod(ctx, bundle, pod)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error in ensure Unpack pod %v", err)
 	} else if op == controllerutil.OperationResultCreated || op == controllerutil.OperationResultUpdated || pod.DeletionTimestamp != nil {
-		return &Result{State: StatePending}, nil
+		for {
+			fmt.Println("here waiting for status")
+			pod = &corev1.Pod{}
+			err := i.Client.Get(context.TODO(), types.NamespacedName{Namespace: i.PodNamespace, Name: bundle.Name}, pod)
+			if err != nil {
+				panic(err)
+			}
+
+			if pod.Status.Phase == corev1.PodSucceeded {
+				break
+			}
+
+			time.Sleep(time.Second * (2))
+		}
+		return i.succeededPodResult(ctx, pod)
 	}
 
 	switch phase := pod.Status.Phase; phase {
@@ -65,14 +82,16 @@ func (i *Image) Unpack(ctx context.Context, bundle *rukpakv1alpha1.Bundle) (*Res
 }
 
 func (i *Image) ensureUnpackPod(ctx context.Context, bundle *rukpakv1alpha1.Bundle, pod *corev1.Pod) (controllerutil.OperationResult, error) {
+	fmt.Println("ensure unpack pod")
 	existingPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: i.PodNamespace, Name: bundle.Name}}
 	if err := i.Client.Get(ctx, client.ObjectKeyFromObject(existingPod), existingPod); client.IgnoreNotFound(err) != nil {
-		return controllerutil.OperationResultNone, err
+		return controllerutil.OperationResultNone, fmt.Errorf("error in fetching existing pod %v", err)
 	}
 
 	podApplyConfig := i.getDesiredPodApplyConfig(bundle)
 	updatedPod, err := i.KubeClient.CoreV1().Pods(i.PodNamespace).Apply(ctx, podApplyConfig, metav1.ApplyOptions{Force: true, FieldManager: "rukpak-core"})
 	if err != nil {
+		fmt.Println("non nil error", err)
 		if !apierrors.IsInvalid(err) {
 			return controllerutil.OperationResultNone, err
 		}
@@ -96,6 +115,7 @@ func (i *Image) ensureUnpackPod(ctx context.Context, bundle *rukpakv1alpha1.Bund
 	if equality.Semantic.DeepEqual(existingPod, newPod) {
 		return controllerutil.OperationResultNone, nil
 	}
+	fmt.Println("ensure unpack pod result")
 	return controllerutil.OperationResultUpdated, nil
 }
 
@@ -128,7 +148,7 @@ func (i *Image) getDesiredPodApplyConfig(bundle *rukpakv1alpha1.Bundle) *applyco
 			WithKind(bundle.Kind).
 			WithAPIVersion(bundle.APIVersion).
 			WithUID(bundle.UID).
-			WithController(true).
+			// WithController(true).
 			WithBlockOwnerDeletion(true),
 		).
 		WithSpec(applyconfigurationcorev1.PodSpec().
@@ -172,6 +192,7 @@ func (i *Image) getDesiredPodApplyConfig(bundle *rukpakv1alpha1.Bundle) *applyco
 			applyconfigurationcorev1.LocalObjectReference().WithName(bundle.Spec.Source.Image.ImagePullSecretName),
 		)
 	}
+	fmt.Println(podApply.OwnerReferences, "owner references!!")
 	return podApply
 }
 
@@ -235,6 +256,7 @@ func (i *Image) getBundleContents(ctx context.Context, pod *corev1.Pod) (fs.FS, 
 
 func (i *Image) getBundleImageDigest(pod *corev1.Pod) (string, error) {
 	for _, ps := range pod.Status.ContainerStatuses {
+		fmt.Println("ps", ps)
 		if ps.Name == imageBundleUnpackContainerName && ps.ImageID != "" {
 			return ps.ImageID, nil
 		}

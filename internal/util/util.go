@@ -69,6 +69,7 @@ func ReconcileDesiredBundle(ctx context.Context, c client.Client, bd *rukpakv1al
 	// specified in the BI resource, and if not, generate a new Bundle that matches the template.
 	b := CheckExistingBundlesMatchesTemplate(existingBundles, bd.Spec.Template)
 	if b == nil {
+		fmt.Println("group version kind: ", bd.GroupVersionKind())
 		controllerRef := metav1.NewControllerRef(bd, bd.GroupVersionKind())
 		hash := GenerateTemplateHash(bd.Spec.Template)
 
