@@ -142,42 +142,18 @@ func NewDefaultUnpacker(systemNsCluster cluster.Cluster, namespace, unpackImage 
 	}), nil
 }
 
-func NewDefaultUnpackerImage(systemNsCluster cluster.Cluster, namespace, unpackImage string, baseUploadManagerURL string, rootCAs *x509.CertPool, client client.Client) (Unpacker, error) {
+func NewDefaultUnpackerImage(systemNsCluster cluster.Cluster, namespace, unpackImage string, client client.Client) (Unpacker, error) {
 	cfg := systemNsCluster.GetConfig()
 	kubeClient, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
-	httpTransport := http.DefaultTransport.(*http.Transport).Clone()
-	if httpTransport.TLSClientConfig == nil {
-		httpTransport.TLSClientConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}
-	}
-	httpTransport.TLSClientConfig.RootCAs = rootCAs
 	return NewUnpacker(map[rukpakv1alpha1.SourceType]Unpacker{
 		rukpakv1alpha1.SourceTypeImage: &Image{
 			Client:       systemNsCluster.GetClient(),
 			KubeClient:   kubeClient,
 			PodNamespace: namespace,
 			UnpackImage:  unpackImage,
-		},
-		rukpakv1alpha1.SourceTypeGit: &Git{
-			Reader:          systemNsCluster.GetClient(),
-			SecretNamespace: namespace,
-		},
-		rukpakv1alpha1.SourceTypeConfigMaps: &ConfigMaps{
-			Reader:             systemNsCluster.GetClient(),
-			ConfigMapNamespace: namespace,
-		},
-		rukpakv1alpha1.SourceTypeUpload: &Upload{
-			baseDownloadURL: baseUploadManagerURL,
-			bearerToken:     systemNsCluster.GetConfig().BearerToken,
-			client:          http.Client{Timeout: uploadClientTimeout, Transport: httpTransport},
-		},
-		rukpakv1alpha1.SourceTypeHTTP: &HTTP{
-			Reader:          systemNsCluster.GetClient(),
-			SecretNamespace: namespace,
 		},
 	}), nil
 }

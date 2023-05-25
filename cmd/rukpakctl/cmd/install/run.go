@@ -3,20 +3,19 @@ package install
 import (
 	"bytes"
 	"context"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"strings"
 
 	"github.com/go-logr/logr"
 	helmclient "github.com/operator-framework/helm-operator-plugins/pkg/client"
 	rukpakv1alpha1 "github.com/operator-framework/rukpak/api/v1alpha1"
 	"github.com/operator-framework/rukpak/internal/provisioner/bundle"
-	helm "github.com/operator-framework/rukpak/internal/provisioner/helm"
+	"github.com/operator-framework/rukpak/internal/provisioner/bundledeployment"
+	"github.com/operator-framework/rukpak/internal/provisioner/plain"
+	"github.com/operator-framework/rukpak/internal/provisioner/registry"
 	"github.com/operator-framework/rukpak/internal/source"
-	storage "github.com/operator-framework/rukpak/internal/storage"
 	util "github.com/operator-framework/rukpak/internal/util"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
@@ -45,30 +44,23 @@ import (
 const (
 	defaultProvisionerClassName       = "core-rukpak-io-plain"
 	defaultBundleProvisionerClassName = "core-rukpak-io-registry"
-	defaultBundleCacheDir             = "/var/cache/bundles"
 	errInstalling                     = "Failed creating desired bundle"
 )
 
 type InstallOptions struct {
-	cfg                        *rest.Config
-	Name                       string
-	ProvisionerClassName       string
-	BundleProvisionerClassName string
-	ImageRef                   string
-	httpBindAddr               string
-	httpExternalAddr           string
-	bundleCAFile               string
-	systemNamespace            string
-	namespace                  string
-	unpackImage                string
-	baseUploadManagerURL       string
-	storageDirectory           string
-	client                     client.Client
-	context                    context.Context
-	storage                    storage.Storage
-	handler                    bundle.Handler
-	acg                        helmclient.ActionClientGetter
-	systemNsCluster            cluster.Cluster
+	cfg                                  *rest.Config
+	Name                                 string
+	ProvisionerClassName                 string
+	BundleDeploymentProvisionerClassName string
+	ImageRef                             string
+	SystemNamespace                      string
+	UnpackImage                          string
+	client                               client.Client
+	context                              context.Context
+	bundlehandler                        bundle.Handler
+	bundleDeploymentHandler              bundledeployment.Handler
+	acg                                  helmclient.ActionClientGetter
+	systemNsCluster                      cluster.Cluster
 }
 
 func (i *InstallOptions) Complete() error {
@@ -90,68 +82,21 @@ func (i *InstallOptions) Complete() error {
 		}
 	}
 
-	if i.httpBindAddr == "" {
-		i.httpBindAddr = ":8080"
+	if i.SystemNamespace == "" {
+		i.SystemNamespace = "rukpak-system"
 	}
 
-	if i.httpExternalAddr == "" {
-		i.httpExternalAddr = "http://localhost:8080"
-	}
-
-	// if i.bundleCAFile == "" {
-	// 	i.bundleCAFile = "/etc/pki/tls/ca.crt"
-	// }
-
-	if i.systemNamespace == "" {
-		i.systemNamespace = "rukpak-system"
-	}
-
-	i.namespace = util.PodNamespace(i.systemNamespace)
-	fmt.Println("namespace: ", i.namespace, "systemNamespace: ", i.systemNamespace)
 	i.systemNsCluster, err = cluster.New(i.cfg, func(opts *cluster.Options) {
 		opts.Scheme = scheme
-		opts.Namespace = i.systemNamespace
 		opts.ClientDisableCacheFor = []client.Object{&corev1.Pod{}}
 	})
 
-	if i.unpackImage == "" {
-		i.unpackImage = "quay.io/operator-framework/rukpak:main"
+	if i.UnpackImage == "" {
+		i.UnpackImage = "quay.io/operator-framework/rukpak:main"
 	}
 
-	i.baseUploadManagerURL = fmt.Sprintf("https://%s.%s.svc", "core", i.namespace)
-
-	if i.storageDirectory == "" {
-		i.storageDirectory = defaultBundleCacheDir
-	}
-
-	storageURL, err := url.Parse(fmt.Sprintf("%s/bundles/", i.httpExternalAddr))
-	if err != nil {
-		return fmt.Errorf("error parsing storage URL %v", err)
-	}
-
-	localStorage := &storage.LocalDirectory{
-		RootDirectory: i.storageDirectory,
-		URL:           *storageURL,
-	}
-
-	var rootCAs *x509.CertPool
-
-	if i.bundleCAFile != "" {
-		var err error
-		if rootCAs, err = util.LoadCertPool(i.bundleCAFile); err != nil {
-			return fmt.Errorf("error loading the rootCAs %v", err)
-		}
-	}
-
-	httpLoader := storage.NewHTTP(
-		storage.WithRootCAs(rootCAs),
-		storage.WithBearerToken(i.cfg.BearerToken),
-	)
-
-	bundleStorage := storage.WithFallbackLoader(localStorage, httpLoader)
-	i.storage = bundleStorage
-
-	i.handler = bundle.HandlerFunc(helm.HandleBundle)
+	i.bundlehandler = bundle.HandlerFunc(registry.HandleBundle)
+	i.bundleDeploymentHandler = bundledeployment.HandlerFunc(plain.HandleBundleDeployment)
 
 	cfgGetter := helmclient.NewActionConfigGetter(i.cfg, i.client.RESTMapper(), logr.Logger{})
 	i.acg = helmclient.NewActionClientGetter(cfgGetter)
@@ -169,9 +114,9 @@ func (i *InstallOptions) Validate() (err error) {
 		i.ProvisionerClassName = defaultProvisionerClassName
 	}
 
-	if i.BundleProvisionerClassName == "" {
+	if i.BundleDeploymentProvisionerClassName == "" {
 		fmt.Println("using the default bundle provisioner class")
-		i.BundleProvisionerClassName = defaultBundleProvisionerClassName
+		i.BundleDeploymentProvisionerClassName = defaultBundleProvisionerClassName
 	}
 
 	if i.ImageRef == "" {
@@ -198,7 +143,7 @@ func (i *InstallOptions) Run() error {
 // CreateBundleDeployment creates a bundleDeployment defined in the
 // specific yaml.
 func (i *InstallOptions) createBundleDeployment() error {
-	fmt.Println("creating bundle deployment")
+	fmt.Println("Creating bundle deployment")
 	bd := rukpakv1alpha1.BundleDeployment{
 		ObjectMeta: v1.ObjectMeta{
 			Name: i.Name,
@@ -207,7 +152,7 @@ func (i *InstallOptions) createBundleDeployment() error {
 			ProvisionerClassName: i.ProvisionerClassName,
 			Template: &rukpakv1alpha1.BundleTemplate{
 				Spec: rukpakv1alpha1.BundleSpec{
-					ProvisionerClassName: i.BundleProvisionerClassName,
+					ProvisionerClassName: i.BundleDeploymentProvisionerClassName,
 					Source: rukpakv1alpha1.BundleSource{
 						Type: rukpakv1alpha1.SourceTypeImage,
 						Image: &rukpakv1alpha1.ImageSource{
@@ -231,188 +176,200 @@ func (i *InstallOptions) fetchDesiredBundle() error {
 	// created before.
 	fetchedBundle := &rukpakv1alpha1.BundleDeployment{}
 	if err := i.client.Get(i.context, types.NamespacedName{Name: i.Name}, fetchedBundle); err != nil {
-		return err
+		return fmt.Errorf("bundleDeployment not found %q", fetchedBundle.Name)
 	}
 
 	bd := fetchedBundle.DeepCopy()
 
 	bd.SetGroupVersionKind(rukpakv1alpha1.BundleDeploymentGVK)
 
-	fmt.Println("Getting GVK here", bd.GroupVersionKind())
 	bundle, allBundles, err := util.ReconcileDesiredBundle(i.context, i.client, bd)
 	if err != nil {
 		meta.SetStatusCondition(&bd.Status.Conditions, v1.Condition{
-			Type:    rukpakv1alpha1.TypeHasValidBundle,
-			Status:  v1.ConditionUnknown,
+			Type:   rukpakv1alpha1.TypeHasValidBundle,
+			Status: v1.ConditionUnknown,
+			// TODO: provide another successful reason
 			Reason:  rukpakv1alpha1.ReasonReconcileFailed,
 			Message: err.Error(),
 		})
 		return fmt.Errorf("Failed creating desired bundle %v", err)
 	}
 
-	if bundle.Status.Phase != rukpakv1alpha1.PhaseUnpacked {
-		reason := rukpakv1alpha1.ReasonUnpackPending
-		status := v1.ConditionTrue
-		message := fmt.Sprintf("Waiting for the %s Bundle to be unpacked", bundle.GetName())
-		if bundle.Status.Phase == rukpakv1alpha1.PhaseFailing {
-			reason = rukpakv1alpha1.ReasonUnpackFailed
-			status = v1.ConditionFalse
-			message = fmt.Sprintf("Failed to unpack the %s Bundle", bundle.GetName())
-			if c := meta.FindStatusCondition(bundle.Status.Conditions, rukpakv1alpha1.TypeUnpacked); c != nil {
-				message = fmt.Sprintf("%s: %s", message, c.Message)
-			}
-		}
-		meta.SetStatusCondition(&bd.Status.Conditions, v1.Condition{
-			Type:    rukpakv1alpha1.TypeHasValidBundle,
-			Status:  status,
-			Reason:  reason,
-			Message: message,
-		})
-	}
-
-	meta.SetStatusCondition(&bd.Status.Conditions, v1.Condition{
-		Type:    rukpakv1alpha1.TypeHasValidBundle,
-		Status:  v1.ConditionTrue,
-		Reason:  rukpakv1alpha1.ReasonUnpackSuccessful,
-		Message: fmt.Sprintf("Successfully unpacked the %s Bundle", bundle.GetName()),
-	})
-
 	// print on concole
 	fmt.Println("Successfully unpacked the bundle")
 
-	unpacker, err := source.NewDefaultUnpackerImage(i.systemNsCluster, i.namespace, i.unpackImage, i.baseUploadManagerURL, nil, i.client)
+	unpacker, err := source.NewDefaultUnpackerImage(i.systemNsCluster, i.SystemNamespace, i.UnpackImage, i.client)
 	if err != nil {
+		meta.SetStatusCondition(&bd.Status.Conditions, v1.Condition{
+			Type:   rukpakv1alpha1.TypeUnpacked,
+			Status: v1.ConditionFalse,
+			// TODO: provide another successful reason
+			Reason:  rukpakv1alpha1.ReasonUnpackFailed,
+			Message: err.Error(),
+		})
 		return fmt.Errorf("error creating unpacker %v", err)
 	}
 
 	bundle.SetGroupVersionKind(rukpakv1alpha1.BundleGVK)
 	unpackResult, err := unpacker.Unpack(i.context, bundle)
 	if err != nil {
+		meta.SetStatusCondition(&bundle.Status.Conditions, v1.Condition{
+			Type:    rukpakv1alpha1.TypeUnpacked,
+			Status:  v1.ConditionFalse,
+			Reason:  rukpakv1alpha1.ReasonUnpackFailed,
+			Message: err.Error(),
+		})
+		bundle.Status.Phase = rukpakv1alpha1.PhaseFailing
+		meta.SetStatusCondition(&bd.Status.Conditions, v1.Condition{
+			Type:   rukpakv1alpha1.TypeUnpacked,
+			Status: v1.ConditionFalse,
+			// TODO: provide another successful reason
+			Reason:  rukpakv1alpha1.ReasonUnpackFailed,
+			Message: err.Error(),
+		})
 		return fmt.Errorf("error unpacking the bundle %v", err)
 	}
 
-	fmt.Println("bundle unpacker", unpackResult)
+	bundle.Status.Phase = rukpakv1alpha1.PhaseUnpacked
+	meta.SetStatusCondition(&bundle.Status.Conditions, v1.Condition{
+		Type:   rukpakv1alpha1.TypeUnpacked,
+		Status: v1.ConditionTrue,
+		// TODO: provide another successful reason
+		Reason:  rukpakv1alpha1.ReasonUnpackSuccessful,
+		Message: "Successfully unpacked image",
+	})
 
-	storeFS, err := i.handler.Handle(i.context, unpackResult.Bundle, bundle)
+	storeFS, err := i.bundlehandler.Handle(i.context, unpackResult.Bundle, bundle)
 	if err != nil {
+		// Set status to bundle
 		return fmt.Errorf("error handling bundle from bundle handler %q", err)
 	}
 
-	fmt.Println("****", storeFS)
-	// bundleFS, err := i.storage.Load(i.context, bundle)
+	chrt, values, err := i.bundleDeploymentHandler.Handle(i.context, storeFS, bd)
+	if err != nil {
+		// TODO: create a new reason for handler
+		fmt.Println("error handling bundleDeployment", err)
+	}
 
-	// if err != nil {
-	// 	return fmt.Errorf("error loading bundle %v", err)
-	// }
-	// fmt.Println("bundleFS", bundleFS)
-	// // chrt, values, err := i.handler.Handle(i.context, bundleFS, bd)
-	// bd.SetNamespace(i.systemNamespace)
-	// cl, err := i.acg.ActionClientFor(bd)
-	// bd.SetNamespace("")
+	bd.SetNamespace(i.SystemNamespace)
+	cl, err := i.acg.ActionClientFor(bd)
+	bd.SetNamespace("")
 
-	// post := &postrenderer{
-	// 	labels: map[string]string{
-	// 		util.CoreOwnerKindKey: rukpakv1alpha1.BundleDeploymentKind,
-	// 		util.CoreOwnerNameKey: bd.GetName(),
-	// 	},
-	// }
+	post := &postrenderer{
+		labels: map[string]string{
+			util.CoreOwnerKindKey: rukpakv1alpha1.BundleDeploymentKind,
+			util.CoreOwnerNameKey: bd.GetName(),
+		},
+	}
 
-	// rel, state, err := i.getReleaseState(cl, bd, chrt, values, post)
+	// Investigate: Direct install/upgrade errors out when existing resources
+	// are on cluster.
+	rel, state, err := i.getReleaseState(cl, bd, chrt, values, post)
 
-	// switch state {
-	// case stateNeedsInstall:
-	// 	rel, err = cl.Install(bd.Name, i.systemNamespace, chrt, values, func(install *action.Install) error {
-	// 		install.CreateNamespace = false
-	// 		return nil
-	// 	},
-	// 		// To be refactored issue https://github.com/operator-framework/rukpak/issues/534
-	// 		func(install *action.Install) error {
-	// 			post.cascade = install.PostRenderer
-	// 			install.PostRenderer = post
-	// 			return nil
-	// 		})
-	// 	if err != nil {
-	// 		if isResourceNotFoundErr(err) {
-	// 			err = errRequiredResourceNotFound{err}
-	// 		}
-	// 		meta.SetStatusCondition(&bd.Status.Conditions, v1.Condition{
-	// 			Type:    rukpakv1alpha1.TypeInstalled,
-	// 			Status:  v1.ConditionFalse,
-	// 			Reason:  rukpakv1alpha1.ReasonInstallFailed,
-	// 			Message: err.Error(),
-	// 		})
-	// 		return err
-	// 	}
-	// case stateNeedsUpgrade:
-	// 	rel, err = cl.Upgrade(bd.Name, i.systemNamespace, chrt, values,
-	// 		// To be refactored issue https://github.com/operator-framework/rukpak/issues/534
-	// 		func(upgrade *action.Upgrade) error {
-	// 			post.cascade = upgrade.PostRenderer
-	// 			upgrade.PostRenderer = post
-	// 			return nil
-	// 		})
-	// 	if err != nil {
-	// 		if isResourceNotFoundErr(err) {
-	// 			err = errRequiredResourceNotFound{err}
-	// 		}
-	// 		meta.SetStatusCondition(&bd.Status.Conditions, v1.Condition{
-	// 			Type:    rukpakv1alpha1.TypeInstalled,
-	// 			Status:  v1.ConditionFalse,
-	// 			Reason:  rukpakv1alpha1.ReasonUpgradeFailed,
-	// 			Message: err.Error(),
-	// 		})
-	// 		return err
-	// 	}
-	// case stateUnchanged:
-	// 	if err := cl.Reconcile(rel); err != nil {
-	// 		if isResourceNotFoundErr(err) {
-	// 			err = errRequiredResourceNotFound{err}
-	// 		}
-	// 		meta.SetStatusCondition(&bd.Status.Conditions, v1.Condition{
-	// 			Type:    rukpakv1alpha1.TypeInstalled,
-	// 			Status:  v1.ConditionFalse,
-	// 			Reason:  rukpakv1alpha1.ReasonReconcileFailed,
-	// 			Message: err.Error(),
-	// 		})
-	// 		return err
-	// 	}
-	// default:
-	// 	return fmt.Errorf("unexpected release state %q", state)
-	// }
+	switch state {
+	case stateNeedsInstall:
+		rel, err = cl.Install(bd.Name, i.SystemNamespace, chrt, values, func(install *action.Install) error {
+			install.CreateNamespace = false
+			return nil
+		},
+			// To be refactored issue https://github.com/operator-framework/rukpak/issues/534
+			func(install *action.Install) error {
+				post.cascade = install.PostRenderer
+				install.PostRenderer = post
+				return nil
+			})
+		if err != nil {
+			if isResourceNotFoundErr(err) {
+				err = errRequiredResourceNotFound{err}
+			}
+			meta.SetStatusCondition(&bd.Status.Conditions, v1.Condition{
+				Type:    rukpakv1alpha1.TypeInstalled,
+				Status:  v1.ConditionFalse,
+				Reason:  rukpakv1alpha1.ReasonInstallFailed,
+				Message: err.Error(),
+			})
+			meta.SetStatusCondition(&bundle.Status.Conditions, v1.Condition{
+				Type:    rukpakv1alpha1.TypeInstalled,
+				Status:  v1.ConditionFalse,
+				Reason:  rukpakv1alpha1.ReasonInstallFailed,
+				Message: err.Error(),
+			})
+			return err
+		}
+	case stateNeedsUpgrade:
+		rel, err = cl.Upgrade(bd.Name, i.SystemNamespace, chrt, values,
+			// To be refactored issue https://github.com/operator-framework/rukpak/issues/534
+			func(upgrade *action.Upgrade) error {
+				post.cascade = upgrade.PostRenderer
+				upgrade.PostRenderer = post
+				return nil
+			})
+		if err != nil {
+			if isResourceNotFoundErr(err) {
+				err = errRequiredResourceNotFound{err}
+			}
+			meta.SetStatusCondition(&bd.Status.Conditions, v1.Condition{
+				Type:    rukpakv1alpha1.TypeInstalled,
+				Status:  v1.ConditionFalse,
+				Reason:  rukpakv1alpha1.ReasonUpgradeFailed,
+				Message: err.Error(),
+			})
+			meta.SetStatusCondition(&bundle.Status.Conditions, v1.Condition{
+				Type:    rukpakv1alpha1.TypeInstalled,
+				Status:  v1.ConditionFalse,
+				Reason:  rukpakv1alpha1.ReasonUpgradeFailed,
+				Message: err.Error(),
+			})
+			return err
+		}
+	default:
+		return fmt.Errorf("unexpected release state %q", state)
+	}
 
-	// relObjects, err := util.ManifestObjects(strings.NewReader(rel.Manifest), fmt.Sprintf("%s-release-manifest", rel.Name))
-	// if err != nil {
-	// 	meta.SetStatusCondition(&bd.Status.Conditions, v1.Condition{
-	// 		Type:    rukpakv1alpha1.TypeInstalled,
-	// 		Status:  v1.ConditionFalse,
-	// 		Reason:  rukpakv1alpha1.ReasonCreateDynamicWatchFailed,
-	// 		Message: err.Error(),
-	// 	})
-	// 	return err
-	// }
+	relObjects, err := util.ManifestObjects(strings.NewReader(rel.Manifest), fmt.Sprintf("%s-release-manifest", rel.Name))
+	if err != nil {
+		// TODO: introduce an apt status.
+		return err
+	}
 
-	// for _, obj := range relObjects {
-	// 	_, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
-	// 	if err != nil {
-	// 		meta.SetStatusCondition(&bd.Status.Conditions, v1.Condition{
-	// 			Type:    rukpakv1alpha1.TypeInstalled,
-	// 			Status:  v1.ConditionFalse,
-	// 			Reason:  rukpakv1alpha1.ReasonCreateDynamicWatchFailed,
-	// 			Message: err.Error(),
-	// 		})
-	// 		return err
-	// 	}
-	// }
-	// meta.SetStatusCondition(&bd.Status.Conditions, v1.Condition{
-	// 	Type:    rukpakv1alpha1.TypeInstalled,
-	// 	Status:  v1.ConditionTrue,
-	// 	Reason:  rukpakv1alpha1.ReasonInstallationSucceeded,
-	// 	Message: fmt.Sprintf("Instantiated bundle %s successfully", bundle.GetName()),
-	// })
-	// bd.Status.ActiveBundle = bundle.GetName()
+	for _, obj := range relObjects {
+		_, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+		if err != nil {
+			meta.SetStatusCondition(&bd.Status.Conditions, v1.Condition{
+				Type:    rukpakv1alpha1.TypeInstalled,
+				Status:  v1.ConditionFalse,
+				Reason:  rukpakv1alpha1.ReasonInstallFailed,
+				Message: err.Error(),
+			})
+			return err
+		}
+	}
+	meta.SetStatusCondition(&bd.Status.Conditions, v1.Condition{
+		Type:    rukpakv1alpha1.TypeInstalled,
+		Status:  v1.ConditionTrue,
+		Reason:  rukpakv1alpha1.ReasonInstallationSucceeded,
+		Message: fmt.Sprintf("Instantiated bundle %s successfully", bundle.GetName()),
+	})
+
+	meta.SetStatusCondition(&bundle.Status.Conditions, v1.Condition{
+		Type:    rukpakv1alpha1.TypeInstalled,
+		Status:  v1.ConditionTrue,
+		Reason:  rukpakv1alpha1.ReasonInstallationSucceeded,
+		Message: fmt.Sprintf("Instantiated bundle %s successfully", bundle.GetName()),
+	})
+
+	bd.Status.ActiveBundle = bundle.GetName()
 
 	if err := i.reconcileOldBundles(i.context, bundle, allBundles); err != nil {
 		return fmt.Errorf("failed to delete old bundles: %v", err)
+	}
+
+	if err := i.client.Status().Update(i.context, bd); err != nil {
+		return fmt.Errorf("error updating bd status")
+	}
+
+	if err := i.client.Status().Update(i.context, bundle); err != nil {
+		return fmt.Errorf("error updating bundle status")
 	}
 
 	return nil
@@ -483,7 +440,7 @@ func (p *InstallOptions) getReleaseState(cl helmclient.ActionInterface, obj v1.O
 	if errors.Is(err, driver.ErrReleaseNotFound) {
 		return nil, stateNeedsInstall, nil
 	}
-	desiredRelease, err := cl.Upgrade(obj.GetName(), p.systemNamespace, chrt, values, func(upgrade *action.Upgrade) error {
+	desiredRelease, err := cl.Upgrade(obj.GetName(), p.SystemNamespace, chrt, values, func(upgrade *action.Upgrade) error {
 		upgrade.DryRun = true
 		return nil
 	},
