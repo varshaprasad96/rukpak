@@ -11,7 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	rukpakv1alpha1 "github.com/operator-framework/rukpak/api/v1alpha1"
+	rukpakv1alpha2 "github.com/operator-framework/rukpak/api/v1alpha2"
 )
 
 //+kubebuilder:rbac:groups=core.rukpak.io,resources=bundles,verbs=list;watch
@@ -31,13 +31,13 @@ func (w *ConfigMap) ValidateCreate(ctx context.Context, obj runtime.Object) erro
 		return nil
 	}
 
-	bundledeploymentList := &rukpakv1alpha1.BundleDeploymentList{}
+	bundledeploymentList := &rukpakv1alpha2.BundleDeploymentList{}
 	if err := w.Client.List(ctx, bundledeploymentList); err != nil {
 		return err
 	}
 	bundleReferrers := []string{}
 	for _, bundle := range bundledeploymentList.Items {
-		if bundle.Spec.Source.Type == rukpakv1alpha1.SourceTypeConfigMaps {
+		if bundle.Spec.Source.Type == rukpakv1alpha2.SourceTypeConfigMaps {
 			for _, bundleConfigMapRef := range bundle.Spec.Source.ConfigMaps {
 				if bundleConfigMapRef.ConfigMap.Name == cm.Name {
 					bundleReferrers = append(bundleReferrers, bundle.Name)
@@ -58,7 +58,7 @@ func (w *ConfigMap) ValidateUpdate(_ context.Context, _, _ runtime.Object) error
 func (w *ConfigMap) ValidateDelete(ctx context.Context, obj runtime.Object) error {
 	cm := obj.(*corev1.ConfigMap)
 
-	bundleList := &rukpakv1alpha1.BundleDeploymentList{}
+	bundleList := &rukpakv1alpha2.BundleDeploymentList{}
 	if err := w.Client.List(ctx, bundleList); err != nil {
 		return err
 	}
