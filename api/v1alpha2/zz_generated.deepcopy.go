@@ -105,6 +105,11 @@ func (in *BundleDeploymentList) DeepCopyObject() runtime.Object {
 func (in *BundleDeploymentSpec) DeepCopyInto(out *BundleDeploymentSpec) {
 	*out = *in
 	in.Source.DeepCopyInto(&out.Source)
+	if in.WatchNamespaces != nil {
+		in, out := &in.WatchNamespaces, &out.WatchNamespaces
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	in.Config.DeepCopyInto(&out.Config)
 }
 

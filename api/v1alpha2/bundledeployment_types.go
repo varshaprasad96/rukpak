@@ -54,6 +54,9 @@ type BundleDeploymentSpec struct {
 	ProvisionerClassName string `json:"provisionerClassName"`
 	// Source defines the configuration for the underlying Bundle content.
 	Source BundleSource `json:"source"`
+	// +kubebuilder:validation:Optional
+ 	// watchNamespaces indicates which namespaces the operator should watch.
+ 	WatchNamespaces []string `json:"watchNamespaces,omitempty"`
 	// Config is provisioner specific configurations
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Config runtime.RawExtension `json:"config,omitempty"`

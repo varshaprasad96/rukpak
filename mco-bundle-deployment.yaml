@@ -1,0 +1,12 @@
+apiVersion: core.rukpak.io/v1alpha2
+kind: BundleDeployment
+metadata:
+  name: mco-bundle
+spec:
+  provisionerClassName: core-rukpak-io-registry
+  source:
+    type: git
+    git:
+      ref:
+        branch: main
+      repository: https://github.com/varshaprasad96/mco-operator-bundle
